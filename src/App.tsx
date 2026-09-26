@@ -26,7 +26,7 @@ function App() {
   const [timeLeftStr, setTimeLeftStr] = useState("00:00:00");
   const [timeLeftSec, setTimeLeftSec] = useState(0);
 
-  const monitorIntervalRef = useRef<number | null>(null);
+
   const countdownIntervalRef = useRef<number | null>(null);
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -150,8 +150,6 @@ function App() {
       if (q && q.allowed) {
         // 额度充足时，进入“无人值守/自动连点”模式
         // 每隔一段较短的时间（比如 30 秒）检测一次会话是否空闲
-        let hasTriggered = false;
-        
         for (const id of Array.from(selectedSessions)) {
           try {
             const turnInfo: { turn_id: string, status: string } | null = await invoke("get_session_status", { sessionId: id });
@@ -167,7 +165,6 @@ function App() {
                   addLog(`✅ 成功: ${res}`);
                   // 记录这次触发的回合ID，只要回合不更新，就不会重复发
                   lastTriggeredTurnRef.current[id] = turnInfo.turn_id;
-                  hasTriggered = true;
                 }
               }
             }
