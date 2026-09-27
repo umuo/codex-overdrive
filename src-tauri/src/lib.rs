@@ -105,20 +105,34 @@ async fn check_quota() -> Result<QuotaState, String> {
 
 #[tauri::command]
 fn start_caffeinate() -> Result<String, String> {
-    Command::new("caffeinate")
-        .args(["-d", "-i", "-m", "-s"])
-        .spawn()
-        .map(|_| "Caffeinate started".to_string())
-        .map_err(|e| e.to_string())
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("caffeinate")
+            .args(["-d", "-i", "-m", "-s"])
+            .spawn()
+            .map(|_| "Caffeinate started".to_string())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("Sleep prevention skipped on non-macOS platforms.".to_string())
+    }
 }
 
 #[tauri::command]
 fn stop_caffeinate() -> Result<String, String> {
-    Command::new("killall")
-        .arg("caffeinate")
-        .status()
-        .map(|_| "Caffeinate stopped".to_string())
-        .map_err(|e| e.to_string())
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("killall")
+            .arg("caffeinate")
+            .status()
+            .map(|_| "Caffeinate stopped".to_string())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("Sleep prevention skipped on non-macOS platforms.".to_string())
+    }
 }
 
 
