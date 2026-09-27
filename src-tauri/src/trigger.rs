@@ -2,7 +2,17 @@ use std::process::Command;
 
 pub fn trigger_via_cli(session_id: &str, message: &str) -> Result<String, String> {
     #[cfg(target_os = "macos")]
-    let cli_path = "/Applications/ChatGPT.app/Contents/Resources/codex";
+    let cli_path = {
+        let p1 = std::path::Path::new("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex");
+        let p2 = std::path::Path::new("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex");
+        if p1.exists() {
+            p1.to_str().unwrap()
+        } else if p2.exists() {
+            p2.to_str().unwrap()
+        } else {
+            "codex"
+        }
+    };
     
     #[cfg(target_os = "windows")]
     let cli_path = "codex.exe"; // Windows 用户通常需要把 codex.exe 加入环境变量
