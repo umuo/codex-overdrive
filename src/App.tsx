@@ -339,7 +339,21 @@ function App() {
             </svg>
           </div>
           <div className="countdown">
-            <p className="countdown-label">距离额度重置还剩</p>
+            <p className="countdown-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+              距离额度重置还剩
+              <button 
+                className="btn-refresh" 
+                onClick={fetchQuota} 
+                title="手动刷新额度"
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '0', display: 'flex' }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="23 4 23 10 17 10"></polyline>
+                  <polyline points="1 20 1 14 7 14"></polyline>
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                </svg>
+              </button>
+            </p>
             <p className="countdown-time" style={{color: strokeColor}}>{timeLeftStr}</p>
           </div>
         </div>
