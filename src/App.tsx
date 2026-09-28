@@ -1,7 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from '@tauri-apps/api/app';
-import { openUrl } from '@tauri-apps/plugin-opener';
 import "./App.css";
 
 interface Session {
@@ -33,15 +31,24 @@ function App() {
 
   const [searchTerm, setSearchTerm] = useState("");
   const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
+  const [updaterContext, setUpdaterContext] = useState<any>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number>(0);
+  const [currentVersion, setCurrentVersion] = useState<string>("读取中...");
 
   useEffect(() => {
     const checkUpdate = async () => {
       try {
-        const currentVersion = await getVersion();
-        const res = await fetch("https://api.github.com/repos/umuo/codex-overdrive/releases/latest");
-        const data = await res.json();
-        if (data.tag_name && data.tag_name !== `v${currentVersion}`) {
-          setUpdateAvailable(data.tag_name);
+        // dynamic import so it doesn't break if not in tauri
+        const { getVersion } = await import('@tauri-apps/api/app');
+        const v = await getVersion();
+        setCurrentVersion(v);
+        
+        const { check } = await import('@tauri-apps/plugin-updater');
+        const update = await check();
+        if (update) {
+          setUpdateAvailable(update.version);
+          setUpdaterContext(update);
         }
       } catch (e) {
         console.error("Update check failed", e);
@@ -49,6 +56,41 @@ function App() {
     };
     checkUpdate();
   }, []);
+
+  const handleUpdate = async () => {
+    if (!updaterContext || isUpdating) return;
+    setIsUpdating(true);
+    let downloaded = 0;
+    let contentLength = 0;
+    try {
+      await updaterContext.downloadAndInstall((event: any) => {
+        switch (event.event) {
+          case 'Started':
+            contentLength = event.data.contentLength;
+            console.log(`started downloading ${event.data.contentLength} bytes`);
+            break;
+          case 'Progress':
+            downloaded += event.data.chunkLength;
+            if (contentLength > 0) {
+              setUpdateProgress(Math.round((downloaded / contentLength) * 100));
+            }
+            break;
+          case 'Finished':
+            console.log('download finished');
+            setUpdateProgress(100);
+            break;
+        }
+      });
+      console.log('update installed');
+      const { relaunch } = await import('@tauri-apps/plugin-process');
+      await relaunch();
+    } catch (e) {
+      console.error(e);
+      alert("更新失败: " + e);
+      setIsUpdating(false);
+      setUpdateProgress(0);
+    }
+  };
 
   const loadSessions = async () => {
     try {
@@ -337,16 +379,20 @@ function App() {
       </div>
 
       <div className="main-panel">
-        <h1 className="title">额度监控与自动触发</h1>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+          <h1 className="title">额度监控与自动触发</h1>
+          <span style={{ fontSize: '12px', color: '#666' }}>当前版本: v{currentVersion}</span>
+        </div>
         
         {updateAvailable && (
           <div className="update-banner" style={{ background: '#4CAF50', color: 'white', padding: '10px 15px', borderRadius: '8px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span>🎉 发现新版本：{updateAvailable}</span>
             <button 
-              style={{ background: 'white', color: '#4CAF50', border: 'none', padding: '5px 15px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
-              onClick={() => openUrl("https://github.com/umuo/codex-overdrive/releases/latest")}
+              style={{ background: 'white', color: '#4CAF50', border: 'none', padding: '5px 15px', borderRadius: '4px', cursor: isUpdating ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}
+              onClick={handleUpdate}
+              disabled={isUpdating}
             >
-              点击下载
+              {isUpdating ? `下载中... ${updateProgress}%` : '自动更新并安装'}
             </button>
           </div>
         )}
