@@ -232,9 +232,9 @@ function App() {
             const turnInfo: { turn_id: string, status: string } | null = await invoke("get_session_status", { sessionId: id });
             
             if (turnInfo) {
-              // status 为 'completed' 代表 Agent 已经执行完当前回合（正在发呆/等待输入）
+              // status 不为 'inProgress' 代表 Agent 当前处于空闲状态（completed/failed/interrupted）（正在发呆/等待输入）
               // status 为 'inProgress' 代表 Agent 还在跑
-              if (turnInfo.status === 'completed') {
+              if (turnInfo.status !== 'inProgress') {
                 const lastTurn = lastTriggeredTurnRef.current[id];
                 if (lastTurn !== turnInfo.turn_id) {
                   addLog(`🤖 [无人值守] 检测到会话 ${id.substring(0, 8)} 执行结束(Idle)。自动下发指令："${triggerMessage}"`);
