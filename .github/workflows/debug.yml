@@ -1,0 +1,17 @@
+name: Debug Secrets
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Secret
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY IS EMPTY"
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY IS SET"
+          fi
