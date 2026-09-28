@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from '@tauri-apps/api/app';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import "./App.css";
 
 interface Session {
@@ -30,6 +32,23 @@ function App() {
   const countdownIntervalRef = useRef<number | null>(null);
 
   const [searchTerm, setSearchTerm] = useState("");
+  const [updateAvailable, setUpdateAvailable] = useState<string | null>(null);
+
+  useEffect(() => {
+    const checkUpdate = async () => {
+      try {
+        const currentVersion = await getVersion();
+        const res = await fetch("https://api.github.com/repos/umuo/codex-overdrive/releases/latest");
+        const data = await res.json();
+        if (data.tag_name && data.tag_name !== `v${currentVersion}`) {
+          setUpdateAvailable(data.tag_name);
+        }
+      } catch (e) {
+        console.error("Update check failed", e);
+      }
+    };
+    checkUpdate();
+  }, []);
 
   const loadSessions = async () => {
     try {
@@ -320,6 +339,18 @@ function App() {
       <div className="main-panel">
         <h1 className="title">额度监控与自动触发</h1>
         
+        {updateAvailable && (
+          <div className="update-banner" style={{ background: '#4CAF50', color: 'white', padding: '10px 15px', borderRadius: '8px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>🎉 发现新版本：{updateAvailable}</span>
+            <button 
+              style={{ background: 'white', color: '#4CAF50', border: 'none', padding: '5px 15px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+              onClick={() => openUrl("https://github.com/umuo/codex-overdrive/releases/latest")}
+            >
+              点击下载
+            </button>
+          </div>
+        )}
+
         <div className="quota-dashboard">
           <div className="quota-ring">
             <svg viewBox="0 0 36 36" className="circular-chart">
@@ -335,7 +366,8 @@ function App() {
                   a 15.9155 15.9155 0 0 1 0 31.831
                   a 15.9155 15.9155 0 0 1 0 -31.831"
               />
-              <text x="18" y="20.35" className="percentage">{percentage}%</text>
+              <text x="18" y="18" className="percentage" style={{ fontSize: '7px' }}>{percentage}%</text>
+              <text x="18" y="25" className="percentage" style={{ fontSize: '3px', fill: '#999' }}>已使用额度</text>
             </svg>
           </div>
           <div className="countdown">
