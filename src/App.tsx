@@ -36,13 +36,17 @@ function App() {
   const [updateProgress, setUpdateProgress] = useState<number>(0);
   const [currentVersion, setCurrentVersion] = useState<string>("读取中...");
 
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+
   useEffect(() => {
     checkUpdate();
   }, []);
 
   const checkUpdate = async (manual = false) => {
+    if (isCheckingUpdate) return;
     try {
       if (manual) {
+        setIsCheckingUpdate(true);
         setCurrentVersion("检测中...");
       }
       const { getVersion } = await import('@tauri-apps/api/app');
@@ -61,6 +65,10 @@ function App() {
       console.error("Update check failed", e);
       if (manual) {
         alert("检查更新失败: " + e);
+      }
+    } finally {
+      if (manual) {
+        setIsCheckingUpdate(false);
       }
     }
   };
@@ -392,10 +400,11 @@ function App() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '12px', color: '#666' }}>当前版本: v{currentVersion}</span>
             <button 
-              style={{ fontSize: '12px', padding: '2px 8px', borderRadius: '4px', border: '1px solid #ccc', background: '#f5f5f5', cursor: 'pointer' }}
+              style={{ fontSize: '12px', padding: '2px 8px', borderRadius: '4px', border: '1px solid #ccc', background: isCheckingUpdate ? '#e0e0e0' : '#f5f5f5', cursor: isCheckingUpdate ? 'not-allowed' : 'pointer', color: isCheckingUpdate ? '#999' : '#000' }}
               onClick={() => checkUpdate(true)}
+              disabled={isCheckingUpdate}
             >
-              检查更新
+              {isCheckingUpdate ? '检测中...' : '检查更新'}
             </button>
           </div>
         </div>
