@@ -255,26 +255,51 @@ function App() {
 
       } else {
         // 额度耗尽，进入防风控等待模式
-        const minMins = 5;
-        const maxMins = 20;
-
+        // 额度耗尽，进入防风控等待模式，根据剩余时间动态调整探测频率
         if (q && q.reset_at) {
           const now = Math.floor(Date.now() / 1000);
           const diff = q.reset_at - now;
           
-          if (diff > 300) {
-            const actualMaxMins = Math.min(maxMins, Math.ceil(diff / 60));
-            const randomMins = Math.floor(Math.random() * (actualMaxMins - minMins + 1)) + minMins;
-            nextCheckMs = randomMins * 60 * 1000;
-            addLog(`⏳ [等待额度] 下一次额度探测将在 ${randomMins} 分钟后进行...`);
-          } else if (diff > 0) {
-            nextCheckMs = Math.floor(Math.random() * 60 + 30) * 1000;
+          let minMs = 0;
+          let maxMs = 0;
+          
+          if (diff > 3600) { // 剩余大于1小时
+            minMs = 10 * 60 * 1000;
+            maxMs = 20 * 60 * 1000;
+          } else if (diff > 1800) { // 剩余30-60分钟
+            minMs = 5 * 60 * 1000;
+            maxMs = 10 * 60 * 1000;
+          } else if (diff > 600) { // 剩余10-30分钟
+            minMs = 2 * 60 * 1000;
+            maxMs = 5 * 60 * 1000;
+          } else if (diff > 180) { // 剩余3-10分钟
+            minMs = 60 * 1000;
+            maxMs = 120 * 1000;
+          } else if (diff > 60) { // 剩余1-3分钟
+            minMs = 30 * 1000;
+            maxMs = 60 * 1000;
+          } else if (diff > 0) { // 剩余1分钟以内
+            minMs = 15 * 1000;
+            maxMs = 30 * 1000;
+          } else { // 已经到了或超过时间，但可能接口还没刷新额度
+            minMs = 10 * 1000;
+            maxMs = 20 * 1000;
+          }
+          
+          nextCheckMs = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+          const nextCheckSecs = Math.round(nextCheckMs / 1000);
+          
+          // 为了避免刷屏，只在间隔大于 1 分钟时才打印详细日志
+          if (nextCheckMs >= 60000) {
+            addLog(`⏳ [等待额度] 下一次探测将在约 ${Math.round(nextCheckSecs / 60)} 分钟后进行 (剩余${Math.round(diff/60)}分钟)`);
           } else {
-            nextCheckMs = Math.floor(Math.random() * 120 + 60) * 1000;
+            addLog(`⏳ [等待额度] 临近刷新，${nextCheckSecs} 秒后探测...`);
           }
         } else {
-          const randomMins = Math.floor(Math.random() * (maxMins - minMins + 1)) + minMins;
+          // 拿不到 reset_at 时的兜底
+          const randomMins = Math.floor(Math.random() * (10 - 5 + 1)) + 5;
           nextCheckMs = randomMins * 60 * 1000;
+          addLog(`⏳ [等待额度] 未知重置时间，将在 ${randomMins} 分钟后重试...`);
         }
       }
 
