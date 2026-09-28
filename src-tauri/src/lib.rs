@@ -76,7 +76,11 @@ async fn check_quota() -> Result<QuotaState, String> {
         }
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .use_native_tls()
+        .build()
+        .map_err(|e| e.to_string())?;
+    
     let res = client.get("https://chatgpt.com/backend-api/wham/usage")
         .headers(headers)
         .send()
