@@ -37,25 +37,33 @@ function App() {
   const [currentVersion, setCurrentVersion] = useState<string>("读取中...");
 
   useEffect(() => {
-    const checkUpdate = async () => {
-      try {
-        // dynamic import so it doesn't break if not in tauri
-        const { getVersion } = await import('@tauri-apps/api/app');
-        const v = await getVersion();
-        setCurrentVersion(v);
-        
-        const { check } = await import('@tauri-apps/plugin-updater');
-        const update = await check();
-        if (update) {
-          setUpdateAvailable(update.version);
-          setUpdaterContext(update);
-        }
-      } catch (e) {
-        console.error("Update check failed", e);
-      }
-    };
     checkUpdate();
   }, []);
+
+  const checkUpdate = async (manual = false) => {
+    try {
+      if (manual) {
+        setCurrentVersion("检测中...");
+      }
+      const { getVersion } = await import('@tauri-apps/api/app');
+      const v = await getVersion();
+      setCurrentVersion(v);
+      
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const update = await check();
+      if (update) {
+        setUpdateAvailable(update.version);
+        setUpdaterContext(update);
+      } else if (manual) {
+        alert(`当前已是最新版本 (v${v})`);
+      }
+    } catch (e) {
+      console.error("Update check failed", e);
+      if (manual) {
+        alert("检查更新失败: " + e);
+      }
+    }
+  };
 
   const handleUpdate = async () => {
     if (!updaterContext || isUpdating) return;
@@ -381,7 +389,15 @@ function App() {
       <div className="main-panel">
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
           <h1 className="title">额度监控与自动触发</h1>
-          <span style={{ fontSize: '12px', color: '#666' }}>当前版本: v{currentVersion}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '12px', color: '#666' }}>当前版本: v{currentVersion}</span>
+            <button 
+              style={{ fontSize: '12px', padding: '2px 8px', borderRadius: '4px', border: '1px solid #ccc', background: '#f5f5f5', cursor: 'pointer' }}
+              onClick={() => checkUpdate(true)}
+            >
+              检查更新
+            </button>
+          </div>
         </div>
         
         {updateAvailable && (
