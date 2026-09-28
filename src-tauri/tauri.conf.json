@@ -34,9 +34,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "infoPlist": {
-        "NSAppSleepDisabled": true
-      }
+      "infoPlist": "Info.plist"
     }
   }
 }
