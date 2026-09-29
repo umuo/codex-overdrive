@@ -8,16 +8,17 @@
 
 - **⏳ 额度实时监控**
   - 直连本地 `auth.json` 身份凭证，获取云端真实的额度状态和重置倒计时。
-  - 智能防风控 (Smart Polling)：在额度受限时，模拟人类操作习惯进行 5~20 分钟的随机轮询，距离解封越近探测越快，防止被官方 API 拦截封号。
+  - 动态轮询 (Smart Polling)：在额度受限时，根据距离重置的时间进行 10 秒至 20 分钟的随机轮询；距离重置越近，探测越频繁。
 
 - **🤖 无人值守自动连点 (Auto-Loop)**
   - 深入读取 Codex 底层 SQLite 数据库 (`thread_history_1.sqlite`)，实时感知 Agent 的执行状态 (`inProgress` 或 `completed`)。
   - 在额度充足的前提下，只要检测到 Agent 处于空闲/等待状态，程序会立刻自动下发自定义触发消息。
-  - 自带 `TurnID` 记忆防刷屏机制，确保同一个回合绝不多发一次消息。
+  - 自带 `TurnID` 记忆防刷屏机制，避免自动监控对同一个回合重复发送消息（记录保存在当前应用内存中）。
 
 - **💬 常用触发语管理系统 (CRUD)**
   - 支持持久化保存常用触发语（如：“继续”、“恢复目标”、“请继续刚才未完成的代码”等）。
-  - 支持下拉框快速切换、随时修改和一键删除。
+  - 支持常用语快捷切换、多行编辑、保存和删除。
+  - 会话列表支持搜索、受限目标筛选和批量选择；监控期间锁定配置，停止后可修改。
 
 - **🔧 底层 CLI 极速触发**
   - 放弃脆弱的 UI 自动化测试（如 AppleScript），直接调用 Codex Desktop 内部隐藏的 `codex queue` 命令行工具。
@@ -25,14 +26,14 @@
 
 - **☕ Caffeinate 防休眠保护**
   - 启动监控后，自动在后台挂载 macOS 的 `caffeinate` 进程。
-  - 防止 Mac 在夜间休眠导致网络断开，并在停止监控后优雅释放系统资源。
+  - 防止 Mac 在夜间休眠导致网络断开，并在停止监控或退出应用时释放本应用启动的防休眠进程。
 
 ## 🚀 快速开始
 
 ### 依赖要求
 - macOS 系统
 - 已安装并登录 Codex Desktop 客户端
-- Node.js (v18+)
+- Node.js（20.19+ 或 22.12+）
 - Rust & Cargo (最新版)
 
 ### 安装与运行
@@ -60,12 +61,26 @@
 
 ## 🛠️ 技术栈
 
-- **Frontend**: React 18, TypeScript, Vite, CSS (Glassmorphism)
+- **Frontend**: React 19, TypeScript, Vite, CSS (Glassmorphism)
 - **Backend**: Rust, Tauri
-- **System APIs**: macOS `caffeinate`, SQLite CLI
+- **System APIs**: macOS `caffeinate`, rusqlite（只读 SQLite）
 - **Communication**: Tauri IPC, Codex Internal CLI
 
 ## 📝 注意事项
 
 - 本工具直接读取 `~/.codex/` 目录下的数据库和凭证，请确保你的 Codex Desktop 正常安装且具备访问权限。
 - 请勿高频手动狂点“测试触发”，合理利用自动监控机制，避免滥用 API 导致账号风控。
+
+## 开发验证
+
+```bash
+npm test           # 监控取消、并发与回合去重回归测试
+npm run build      # TypeScript 检查与前端构建
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+启动监控后会立即检查额度和会话状态，仅向空闲会话发送触发语。停止监控会阻止后续发送和轮询；已经提交给 CLI 的消息无法撤回。
+
+### 界面预览
+
+运行 `npm run dev` 后，访问 `http://localhost:1420/?demo=1` 可使用示例数据测试界面。预览模式只在开发环境的普通浏览器中生效，不读取凭证或发送真实消息；桌面应用始终使用实际数据。

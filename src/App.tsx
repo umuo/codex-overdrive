@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isPreview, isDesktop } from "./bridge";
 import "./App.css";
+import { startMonitor, triggerIdleSessions } from "./monitor";
 
 interface Session {
   id: string;
@@ -20,7 +21,24 @@ function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set());
   const [isMonitoring, setIsMonitoring] = useState(false);
+  const monitoringRef = useRef(false);
+  const monitorTogglePending = useRef(false);
   const [log, setLog] = useState<string[]>([]);
+  const [notice, setNotice] = useState("");
+  const [sessionFilter, setSessionFilter] = useState("all");
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [sessionError, setSessionError] = useState("");
+  const [quotaError, setQuotaError] = useState("");
+  const [isRefreshingQuota, setIsRefreshingQuota] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const sendingRef = useRef(false);
+  const [isToggling, setIsToggling] = useState(false);
+  const [logFilter, setLogFilter] = useState("all");
+  const [followLogs, setFollowLogs] = useState(true);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (followLogs) logEndRef.current?.scrollIntoView({ block: "nearest" });
+  }, [log, followLogs]);
   
   const [quota, setQuota] = useState<QuotaState | null>(null);
   const [timeLeftStr, setTimeLeftStr] = useState("00:00:00");
@@ -44,11 +62,13 @@ function App() {
 
   const checkUpdate = async (manual = false) => {
     if (isCheckingUpdate) return;
+    if (!isDesktop) {
+      setCurrentVersion(isPreview ? "预览" : "网页模式");
+      if (manual) setNotice("请在桌面应用中检查更新。");
+      return;
+    }
     try {
-      if (manual) {
-        setIsCheckingUpdate(true);
-        setCurrentVersion("检测中...");
-      }
+      setIsCheckingUpdate(true);
       const { getVersion } = await import('@tauri-apps/api/app');
       const v = await getVersion();
       setCurrentVersion(v);
@@ -59,17 +79,15 @@ function App() {
         setUpdateAvailable(update.version);
         setUpdaterContext(update);
       } else if (manual) {
-        alert(`当前已是最新版本 (v${v})`);
+        setNotice(`当前已是最新版本 (v${v})`);
       }
     } catch (e) {
       console.error("Update check failed", e);
       if (manual) {
-        alert("检查更新失败: " + e);
+        setNotice("检查更新失败: " + e);
       }
     } finally {
-      if (manual) {
-        setIsCheckingUpdate(false);
-      }
+      setIsCheckingUpdate(false);
     }
   };
 
@@ -102,19 +120,25 @@ function App() {
       await relaunch();
     } catch (e) {
       console.error(e);
-      alert("更新失败: " + e);
+      setNotice("更新失败: " + e);
       setIsUpdating(false);
       setUpdateProgress(0);
     }
   };
 
   const loadSessions = async () => {
+    setIsLoadingSessions(true);
+    setSessionError("");
     try {
       const loaded: Session[] = await invoke("get_sessions");
       setSessions(loaded);
+      setSelectedSessions(prev => new Set([...prev].filter(id => loaded.some(session => session.id === id))));
     } catch (e) {
       console.error(e);
       addLog(`刷新会话失败: ${e}`);
+      setSessionError(String(e));
+    } finally {
+      setIsLoadingSessions(false);
     }
   };
 
@@ -129,13 +153,16 @@ function App() {
   };
 
   const fetchQuota = async () => {
+    setIsRefreshingQuota(true);
     try {
       const q: QuotaState = await invoke("check_quota");
       if (q.error) {
+        setQuotaError(q.error);
         addLog(`额度获取失败: ${q.error}`);
         return null;
       }
       setQuota(q);
+      setQuotaError("");
       
       if (q.reset_at) {
         const now = Math.floor(Date.now() / 1000);
@@ -146,8 +173,11 @@ function App() {
       }
       return q;
     } catch (e) {
+      setQuotaError(String(e));
       addLog(`请求额度接口出错: ${e}`);
       return null;
+    } finally {
+      setIsRefreshingQuota(false);
     }
   };
 
@@ -182,8 +212,11 @@ function App() {
   }, [timeLeftSec]);
 
   const [savedMessages, setSavedMessages] = useState<string[]>(() => {
-    const saved = localStorage.getItem('savedTriggerMessages');
-    return saved ? JSON.parse(saved) : ["继续", "恢复目标", "请继续刚才未完成的代码"];
+    try {
+      const saved = JSON.parse(localStorage.getItem('savedTriggerMessages') || 'null');
+      if (Array.isArray(saved) && saved.length && saved.every(m => typeof m === "string" && m.trim())) return saved as string[];
+    } catch { /* Fall back if stored data is invalid. */ }
+    return ["继续", "恢复目标", "请继续刚才未完成的代码"];
   });
   const [triggerMessage, setTriggerMessage] = useState(savedMessages[0]);
 
@@ -202,7 +235,7 @@ function App() {
 
   const handleDeleteMessage = () => {
     if (savedMessages.length <= 1) {
-      alert("至少保留一条常用语哦！");
+      setNotice("至少保留一条常用语。");
       return;
     }
     const newMessages = savedMessages.filter(m => m !== triggerMessage);
@@ -214,48 +247,41 @@ function App() {
   // 记录已经触发过的回合 ID，避免在同一个回合重复发消息
   const lastTriggeredTurnRef = useRef<Record<string, string>>({});
 
+  const pendingTriggersRef = useRef(new Set<string>());
+
   // Monitor loop (Smart Polling & Auto-Looping)
   useEffect(() => {
-    let timeoutId: number;
+    if (!isMonitoring) return;
 
-    const runCheck = async () => {
-      if (!isMonitoring) return;
-
+    return startMonitor(async (isActive) => {
       const q = await fetchQuota();
+      if (!isActive()) return 0;
       let nextCheckMs = 5 * 60 * 1000;
 
       if (q && q.allowed) {
         // 额度充足时，进入“无人值守/自动连点”模式
         // 每隔一段较短的时间（比如 30 秒）检测一次会话是否空闲
-        for (const id of Array.from(selectedSessions)) {
-          try {
-            const turnInfo: { turn_id: string, status: string } | null = await invoke("get_session_status", { sessionId: id });
-            
-            if (turnInfo) {
-              // status 不为 'inProgress' 代表 Agent 当前处于空闲状态（completed/failed/interrupted）（正在发呆/等待输入）
-              // status 为 'inProgress' 代表 Agent 还在跑
-              if (turnInfo.status !== 'inProgress') {
-                const lastTurn = lastTriggeredTurnRef.current[id];
-                if (lastTurn !== turnInfo.turn_id) {
-                  addLog(`🤖 [无人值守] 检测到会话 ${id.substring(0, 8)} 执行结束(Idle)。自动下发指令："${triggerMessage}"`);
-                  const res = await invoke("trigger_via_cli", { sessionId: id, message: triggerMessage });
-                  addLog(`✅ 成功: ${res}`);
-                  // 记录这次触发的回合ID，只要回合不更新，就不会重复发
-                  lastTriggeredTurnRef.current[id] = turnInfo.turn_id;
-                }
-              }
-            }
-          } catch (err) {
-            console.error(err);
-          }
-        }
-        
+        await triggerIdleSessions({
+          sessionIds: Array.from(selectedSessions),
+          isActive,
+          lastTriggered: lastTriggeredTurnRef.current,
+          pending: pendingTriggersRef.current,
+          getStatus: id => invoke("get_session_status", { sessionId: id }),
+          trigger: async id => {
+            const name = sessions.find(session => session.id === id)?.thread_name || id.substring(0, 8);
+            addLog(`自动续行 · ${name} · 发送："${triggerMessage}"`);
+            await invoke("trigger_via_cli", { sessionId: id, message: triggerMessage });
+            if (isActive()) addLog(`发送成功 · ${name}`);
+          },
+          onError: err => addLog(`自动触发失败: ${err}`),
+        });
+        if (!isActive()) return 0;
+
         // 额度充足且正在监控时，每 30 秒检测一次会话状态
         nextCheckMs = 30 * 1000;
 
       } else {
-        // 额度耗尽，进入防风控等待模式
-        // 额度耗尽，进入防风控等待模式，根据剩余时间动态调整探测频率
+        // 额度耗尽时，根据剩余时间动态调整探测频率
         if (q && q.reset_at) {
           const now = Math.floor(Date.now() / 1000);
           const diff = q.reset_at - now;
@@ -303,27 +329,29 @@ function App() {
         }
       }
 
-      timeoutId = window.setTimeout(runCheck, nextCheckMs);
-    };
-
-    if (isMonitoring) {
-      runCheck();
-    }
-
-    return () => {
-      if (timeoutId) clearTimeout(timeoutId);
-    };
+      return nextCheckMs;
+    }, () => monitoringRef.current);
   }, [isMonitoring, selectedSessions, triggerMessage]);
 
   const triggerAllSelected = async () => {
-    for (const id of Array.from(selectedSessions)) {
-      try {
-        addLog(`正在触发会话 ${id.substring(0, 8)}，消息："${triggerMessage}"`);
-        const res = await invoke("trigger_via_cli", { sessionId: id, message: triggerMessage });
-        addLog(`成功: ${res}`);
-      } catch (err) {
-        addLog(`触发失败: ${err}`);
+    if (sendingRef.current || isMonitoring || !selectedSessions.size || !triggerMessage.trim()) return;
+    sendingRef.current = true;
+    setIsSending(true);
+    let succeeded = 0;
+    try {
+      for (const id of selectedSessions) {
+        try {
+          await invoke("trigger_via_cli", { sessionId: id, message: triggerMessage.trim() });
+          succeeded++;
+          addLog(`发送成功 · ${sessions.find(s => s.id === id)?.thread_name || id}`);
+        } catch (err) {
+          addLog(`发送失败 · ${id}: ${err}`);
+        }
       }
+      setNotice(`发送完成：${succeeded} / ${selectedSessions.size} 个会话成功。`);
+    } finally {
+      sendingRef.current = false;
+      setIsSending(false);
     }
   };
 
@@ -338,233 +366,96 @@ function App() {
   };
 
   const handleMonitorToggle = async () => {
-    if (isMonitoring) {
-      setIsMonitoring(false);
-      try {
-        await invoke("stop_caffeinate");
-      } catch(e) {}
-      addLog("监控已停止。已允许系统息屏休眠。");
-    } else {
-      if (selectedSessions.size === 0) {
-        alert("请先在左侧选择至少一个需要监控的会话！");
-        return;
+    if (monitorTogglePending.current) return;
+    monitorTogglePending.current = true;
+    setIsToggling(true);
+    try {
+      if (monitoringRef.current) {
+        // Invalidate pending checks immediately, before React runs effect cleanup.
+        monitoringRef.current = false;
+        setIsMonitoring(false);
+        try {
+          await invoke("stop_caffeinate");
+          addLog("监控已停止，已释放本应用的防休眠进程。");
+        } catch (e) {
+          addLog(`监控已停止，但释放防休眠进程失败: ${e}`);
+        }
+      } else {
+        if (selectedSessions.size === 0 || !triggerMessage.trim()) {
+          setNotice("请选择会话并填写触发消息。");
+          return;
+        }
+        try {
+          await invoke("start_caffeinate");
+        } catch (e) {
+          addLog(`防休眠启动失败: ${e}`);
+        }
+        monitoringRef.current = true;
+        setIsMonitoring(true);
+        addLog(`开始监控，已选中 ${selectedSessions.size} 个会话。`);
       }
-      setIsMonitoring(true);
-      try {
-        await invoke("start_caffeinate");
-        addLog(`开始监控，已选中 ${selectedSessions.size} 个会话。caffeinate 已启动，保持 Mac 唤醒...`);
-      } catch(e) {
-        addLog(`防息屏启动失败: ${e}`);
-      }
-      
-      const q = await fetchQuota();
-      if (q && q.allowed) {
-        addLog("当前额度充足，立即触发任务！");
-        await triggerAllSelected();
-      }
+    } finally {
+      monitorTogglePending.current = false;
+      setIsToggling(false);
     }
   };
 
-  const percentage = quota ? quota.used_percent.toFixed(1) : 0;
-  const strokeColor = quota && quota.used_percent >= 100 ? "#ff5252" : "#8ab4f8";
-
-  const filteredSessions = sessions.filter(s => 
-    (s.thread_name || "未命名会话").toLowerCase().includes(searchTerm.toLowerCase())
+  const filteredSessions = sessions.filter(s =>
+    (s.thread_name || "未命名会话").toLowerCase().includes(searchTerm.toLowerCase()) &&
+    (sessionFilter !== "selected" || selectedSessions.has(s.id)) &&
+    (sessionFilter !== "limited" || s.is_goal_limited)
   );
+  const editingLocked = isMonitoring || isToggling || isSending;
+  const allVisibleSelected = filteredSessions.length > 0 && filteredSessions.every(s => selectedSessions.has(s.id));
+  const visibleLogs = log.filter(line => logFilter !== "error" || /失败|出错|错误/.test(line));
+  const status = !isMonitoring ? "监控未启动" : quotaError || !quota ? "等待额度状态" : quota.allowed ? "正在监控" : "等待额度恢复";
+  const formatDate = (value: string) => new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 
   return (
-    <div className="app-container">
-      <div className="sidebar">
-        <div className="sidebar-header">
-          <h2>Codex 会话</h2>
-          <button className="btn-refresh" onClick={loadSessions} title="刷新列表">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="23 4 23 10 17 10"></polyline>
-              <polyline points="1 20 1 14 7 14"></polyline>
-              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-            </svg>
-          </button>
+    <div className="app-shell">
+      <aside className="sidebar" aria-label="会话选择">
+        <div className="brand"><span className="brand-name">Codex <strong>Overdrive</strong></span><span className="eyebrow">让任务持续向前</span></div>
+        <div className="sidebar-heading"><h2>会话</h2><span className="count">{sessions.length}</span><button className="text-button push-right" onClick={loadSessions} disabled={isLoadingSessions || editingLocked}>{isLoadingSessions ? "刷新中…" : "刷新"}</button></div>
+        <div className="sidebar-tools">
+          <input aria-label="搜索会话" type="search" placeholder="搜索会话名称…" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+          <div className="segments" aria-label="会话筛选">{[["all", "全部"], ["limited", "受限目标"], ["selected", "已选"]].map(([value, label]) => <button key={value} aria-pressed={sessionFilter === value} onClick={() => setSessionFilter(value)}>{label}{value === "selected" && selectedSessions.size > 0 ? ` ${selectedSessions.size}` : ""}</button>)}</div>
+          <div className="selection-toolbar"><label><input type="checkbox" checked={allVisibleSelected} disabled={editingLocked || !filteredSessions.length} onChange={() => setSelectedSessions(prev => { const next = new Set(prev); filteredSessions.forEach(s => allVisibleSelected ? next.delete(s.id) : next.add(s.id)); return next; })} />选择当前结果</label><button className="text-button" disabled={editingLocked || !selectedSessions.size} onClick={() => setSelectedSessions(new Set())}>清空</button></div>
         </div>
-        <div className="search-bar">
-          <input 
-            type="text" 
-            placeholder="搜索会话..." 
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
+        {sessionError && <div className="inline-error" role="alert">会话加载失败，请重试。<span>{sessionError}</span></div>}
+        <div className="session-list" aria-busy={isLoadingSessions}>
+          {filteredSessions.map(s => <label key={s.id} className={`session-item ${selectedSessions.has(s.id) ? "selected" : ""}`}>
+            <input type="checkbox" checked={selectedSessions.has(s.id)} disabled={editingLocked} onChange={() => toggleSession(s.id)} />
+            <span className="session-info"><span className="session-name" title={s.thread_name}>{s.thread_name || "未命名会话"}</span><span className="session-meta"><time dateTime={s.updated_at}>{formatDate(s.updated_at)}</time>{s.is_goal_limited && <span className="badge warning">目标受限</span>}</span></span>
+          </label>)}
+          {!filteredSessions.length && !sessionError && <div className="empty-state"><strong>{isLoadingSessions ? "正在读取会话…" : searchTerm ? "没有匹配的会话" : sessionFilter === "selected" ? "还没有选择会话" : "暂无会话"}</strong><p>{searchTerm ? "试试其他关键词，或清除搜索。" : "选择需要自动继续的任务，它们会显示在这里。"}</p></div>}
         </div>
-        <div className="session-list">
-          {filteredSessions.map(s => (
-            <div 
-              key={s.id} 
-              className={`session-item ${selectedSessions.has(s.id) ? 'selected' : ''}`}
-              onClick={() => toggleSession(s.id)}
-            >
-              <input 
-                type="checkbox" 
-                checked={selectedSessions.has(s.id)} 
-                readOnly
-              />
-              <div className="session-info">
-                <div className="session-name-row">
-                  <span className="session-name-text" title={s.thread_name || '未命名会话'}>
-                    {s.thread_name || '未命名会话'}
-                  </span>
-                  {s.is_goal_limited && <span className="goal-badge">受限目标</span>}
-                </div>
-                <span className="session-date">{new Date(s.updated_at).toLocaleString()}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
+        <div className="sidebar-footer"><span>已选择 <strong>{selectedSessions.size}</strong> 个会话</span><span>{editingLocked ? "配置已锁定" : "支持多选"}</span></div>
+      </aside>
 
-      <div className="main-panel">
-        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-          <h1 className="title">额度监控与自动触发</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '12px', color: '#666' }}>当前版本: v{currentVersion}</span>
-            <button 
-              style={{ fontSize: '12px', padding: '2px 8px', borderRadius: '4px', border: '1px solid #ccc', background: isCheckingUpdate ? '#e0e0e0' : '#f5f5f5', cursor: isCheckingUpdate ? 'not-allowed' : 'pointer', color: isCheckingUpdate ? '#999' : '#000' }}
-              onClick={() => checkUpdate(true)}
-              disabled={isCheckingUpdate}
-            >
-              {isCheckingUpdate ? '检测中...' : '检查更新'}
-            </button>
-          </div>
-        </div>
-        
-        {updateAvailable && (
-          <div className="update-banner" style={{ background: '#4CAF50', color: 'white', padding: '10px 15px', borderRadius: '8px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>🎉 发现新版本：{updateAvailable}</span>
-            <button 
-              style={{ background: 'white', color: '#4CAF50', border: 'none', padding: '5px 15px', borderRadius: '4px', cursor: isUpdating ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}
-              onClick={handleUpdate}
-              disabled={isUpdating}
-            >
-              {isUpdating ? `下载中... ${updateProgress}%` : '自动更新并安装'}
-            </button>
-          </div>
-        )}
+      <main className="workspace">
+        <header className="page-header"><div><div className="eyebrow">工作台 / 自动续行</div><h1>任务监控</h1></div><div className={`status-pill ${isMonitoring ? "live" : ""}`}><span className="status-dot" />{status}</div></header>
+        {isPreview && <div className="preview-banner">交互预览 · 当前使用示例数据，所有发送操作均为模拟。</div>}
+        {!isDesktop && !isPreview && <div className="preview-banner">请使用桌面应用连接本地 Codex。此页面仅展示界面。</div>}
+        {notice && <div className="notice" role="status"><span>{notice}</span><button className="text-button" onClick={() => setNotice("")}>关闭</button></div>}
+        {updateAvailable && <div className="notice"><span>新版本 {updateAvailable} 已就绪</span><button onClick={handleUpdate} disabled={isUpdating}>{isUpdating ? `下载中 ${updateProgress}%` : "安装并重启"}</button></div>}
 
-        <div className="quota-dashboard">
-          <div className="quota-ring">
-            <svg viewBox="0 0 36 36" className="circular-chart">
-              <path className="circle-bg"
-                d="M18 2.0845
-                  a 15.9155 15.9155 0 0 1 0 31.831
-                  a 15.9155 15.9155 0 0 1 0 -31.831"
-              />
-              <path className="circle"
-                strokeDasharray={`${percentage}, 100`}
-                stroke={strokeColor}
-                d="M18 2.0845
-                  a 15.9155 15.9155 0 0 1 0 31.831
-                  a 15.9155 15.9155 0 0 1 0 -31.831"
-              />
-              <text x="18" y="18" className="percentage" style={{ fontSize: '7px' }}>{percentage}%</text>
-              <text x="18" y="25" className="percentage" style={{ fontSize: '3px', fill: '#999' }}>已使用额度</text>
-            </svg>
-          </div>
-          <div className="countdown">
-            <p className="countdown-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-              距离额度重置还剩
-              <button 
-                className="btn-refresh" 
-                onClick={fetchQuota} 
-                title="手动刷新额度"
-                style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: '0', display: 'flex' }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="23 4 23 10 17 10"></polyline>
-                  <polyline points="1 20 1 14 7 14"></polyline>
-                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-                </svg>
-              </button>
-            </p>
-            <p className="countdown-time" style={{color: strokeColor}}>{timeLeftStr}</p>
-          </div>
-        </div>
+        <section className="metrics" aria-label="监控概览">
+          <div className="metric"><div className="metric-label">已用额度 <button className="text-button" onClick={fetchQuota} disabled={isRefreshingQuota}>{isRefreshingQuota ? "更新中…" : "刷新"}</button></div><div className="metric-value">{quota ? quota.used_percent.toFixed(1) : "—"}<small>{quota ? "%" : ""}</small>{quota && <span className={`badge ${quotaError ? "warning" : quota.allowed ? "positive" : "warning"}`}>{quotaError ? "上次数据" : quota.allowed ? "可用" : "受限"}</span>}</div><progress aria-label="已用额度" max="100" value={quota?.used_percent || 0} /><p>{quotaError ? "读取失败，稍后重试" : quota ? "当前额度窗口" : "正在获取额度"}</p></div>
+          <div className="metric"><div className="metric-label">距离额度重置</div><div className="metric-value mono">{quota?.reset_at ? timeLeftStr : "— — : — —"}</div><p>{quota?.reset_at ? `预计 ${new Date(quota.reset_at * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 重置` : "等待重置时间"}</p></div>
+          <div className="metric"><div className="metric-label">监控范围</div><div className="metric-value">{selectedSessions.size}<small>个会话</small></div><p>{isMonitoring ? "空闲时自动发送 · 同回合去重" : "从左侧选择需要继续的任务"}</p></div>
+        </section>
 
-        <div className="controls">
-          <div className="settings-group message-manager">
-            <label>触发消息：</label>
-            <div className="message-inputs">
-              <select 
-                className="message-select"
-                value={savedMessages.includes(triggerMessage) ? triggerMessage : "custom"}
-                onChange={e => {
-                  if (e.target.value !== "custom") {
-                    setTriggerMessage(e.target.value);
-                  }
-                }}
-              >
-                <option value="custom" disabled>-- 选择常用语或手动修改 --</option>
-                {savedMessages.map((m, idx) => (
-                  <option key={idx} value={m}>{m}</option>
-                ))}
-              </select>
+        <section className="composer panel" aria-labelledby="composer-title">
+          <div className="section-heading"><h2 id="composer-title">触发消息</h2><span>会话空闲且额度可用时发送</span></div>
+          <div className="message-presets" aria-label="常用语">{savedMessages.map(message => <button key={message} className="preset" title={message} aria-pressed={triggerMessage === message} disabled={editingLocked} onClick={() => setTriggerMessage(message)}>{message}</button>)}</div>
+          <textarea aria-label="触发消息" value={triggerMessage} placeholder="输入希望 Codex 继续执行的指令…" disabled={editingLocked} onChange={e => setTriggerMessage(e.target.value)} rows={3} />
+          <div className="message-toolbar"><span>{triggerMessage.length} 字</span><div><button className="text-button" onClick={handleSaveMessage} disabled={editingLocked || savedMessages.includes(triggerMessage.trim()) || !triggerMessage.trim()}>保存为常用语</button><button className="text-button" onClick={handleDeleteMessage} disabled={editingLocked || !savedMessages.includes(triggerMessage) || savedMessages.length <= 1}>删除此常用语</button></div></div>
+          <div className="action-bar"><p>{isMonitoring ? "监控中。停止后可修改会话和消息。" : !selectedSessions.size ? "选择会话后即可启动监控" : !triggerMessage.trim() ? "填写触发消息后即可启动" : `准备就绪，将应用于 ${selectedSessions.size} 个会话`}</p><div className="action-buttons"><button disabled={editingLocked || !selectedSessions.size || !triggerMessage.trim()} onClick={triggerAllSelected}>{isSending ? "发送中…" : "发送一次"}</button><button className={isMonitoring ? "danger-button" : "primary-button"} onClick={handleMonitorToggle} disabled={isToggling || isSending || (!isMonitoring && (!selectedSessions.size || !triggerMessage.trim()))}>{isToggling ? "处理中…" : isMonitoring ? "停止监控" : "启动监控"}</button></div></div>
+        </section>
 
-              <div className="message-actions">
-                <input 
-                  type="text" 
-                  className="message-input"
-                  value={triggerMessage} 
-                  onChange={e => setTriggerMessage(e.target.value)} 
-                />
-                <button 
-                  className="btn-icon" 
-                  onClick={handleSaveMessage} 
-                  disabled={savedMessages.includes(triggerMessage) || !triggerMessage.trim()}
-                  title="保存为常用语"
-                >💾</button>
-                <button 
-                  className="btn-icon" 
-                  onClick={handleDeleteMessage} 
-                  disabled={!savedMessages.includes(triggerMessage)}
-                  title="删除当前常用语"
-                >🗑️</button>
-              </div>
-            </div>
-          </div>
-          
-          <button 
-            className={`btn-monitor ${isMonitoring ? 'active' : ''}`} 
-            onClick={handleMonitorToggle}
-          >
-            {isMonitoring ? '停止监控' : '启动监控'}
-          </button>
-          
-          <button className="btn-test" onClick={triggerAllSelected}>
-            手动测试触发 (IPC)
-          </button>
-
-          <button className="btn-test" onClick={async () => {
-            if (selectedSessions.size === 0) {
-              alert("请选择一个会话进行测试！");
-              return;
-            }
-            for (const id of Array.from(selectedSessions)) {
-              try {
-                addLog(`正在通过底层 CLI 工具直接发送信号...`);
-                const res = await invoke("trigger_via_cli", { sessionId: id, message: triggerMessage });
-                addLog(`成功: ${res}`);
-              } catch (err) {
-                addLog(`CLI 触发失败: ${err}`);
-              }
-            }
-          }}>
-            完美测试触发 (后台 CLI)
-          </button>
-        </div>
-
-        <div className="log-console">
-          <h3>运行日志</h3>
-          <div className="logs">
-            {log.map((l, i) => <div key={i} className="log-line">{l}</div>)}
-          </div>
-        </div>
-      </div>
+        <section className="activity panel" aria-labelledby="activity-title"><div className="section-heading"><h2 id="activity-title">运行记录 <span className="count">{log.length}</span></h2><div className="log-tools"><select aria-label="日志筛选" value={logFilter} onChange={e => setLogFilter(e.target.value)}><option value="all">全部记录</option><option value="error">仅错误</option></select><label><input type="checkbox" checked={followLogs} onChange={e => setFollowLogs(e.target.checked)} />跟随最新</label><button className="text-button" disabled={!log.length} onClick={() => setLog([])}>清空</button></div></div><div className="logs" role="log" aria-label="运行记录" aria-live="polite">{visibleLogs.length ? visibleLogs.map((line, i) => <div className={`log-line ${/失败|出错|错误/.test(line) ? "error" : ""}`} key={i}><time>{line.slice(1, line.indexOf("]"))}</time><span>{line.slice(line.indexOf("]") + 1).trim()}</span></div>) : <div className="empty-state"><strong>{logFilter === "error" ? "暂无错误记录" : "一切就绪，等待开始"}</strong><p>{logFilter === "error" ? "出现的错误会集中显示在这里。" : "启动监控或发送消息后，可在这里查看执行情况。"}</p></div>}<div ref={logEndRef} /></div></section>
+        <footer className="workspace-footer"><span>{isPreview ? "示例数据" : isDesktop ? "本地 Codex" : "未连接桌面服务"}<span className="footer-divider">/</span>最近保留 30 条记录</span><div><span>{currentVersion === "预览" || currentVersion === "网页模式" ? currentVersion : `v${currentVersion}`}</span><button className="text-button" onClick={() => checkUpdate(true)} disabled={isCheckingUpdate}>{isCheckingUpdate ? "检查中…" : "检查更新"}</button></div></footer>
+      </main>
     </div>
   );
 }

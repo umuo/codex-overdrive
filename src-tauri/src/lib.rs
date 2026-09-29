@@ -1,7 +1,11 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::process::{Child, Command};
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
+use tauri::Manager;
 use serde::{Deserialize, Serialize};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::Value;
@@ -107,39 +111,85 @@ async fn check_quota() -> Result<QuotaState, String> {
     })
 }
 
-#[tauri::command]
-fn start_caffeinate() -> Result<String, String> {
+#[derive(Default)]
+struct SleepPrevention {
     #[cfg(target_os = "macos")]
-    {
-        Command::new("caffeinate")
-            .args(["-d", "-i", "-m", "-s"])
-            .spawn()
-            .map(|_| "Caffeinate started".to_string())
-            .map_err(|e| e.to_string())
+    child: Mutex<Option<Child>>,
+}
+
+impl SleepPrevention {
+    fn start(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            let mut child = self.child.lock().map_err(|e| e.to_string())?;
+            if let Some(process) = child.as_mut() {
+                if process.try_wait().map_err(|e| e.to_string())?.is_none() {
+                    return Ok(());
+                }
+            }
+            *child = None;
+            // Also release assertions if the parent exits unexpectedly.
+            *child = Some(Command::new("caffeinate")
+                .args(["-d", "-i", "-m", "-s", "-w"])
+                .arg(std::process::id().to_string())
+                .spawn()
+                .map_err(|e| e.to_string())?);
+        }
+        Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok("Sleep prevention skipped on non-macOS platforms.".to_string())
+
+    fn stop(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            let mut child = self.child.lock().map_err(|e| e.to_string())?;
+            if let Some(process) = child.as_mut() {
+                if process.try_wait().map_err(|e| e.to_string())?.is_none() {
+                    process.kill().map_err(|e| e.to_string())?;
+                    process.wait().map_err(|e| e.to_string())?;
+                }
+            }
+            *child = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SleepPrevention {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::SleepPrevention;
+
+    #[test]
+    fn sleep_prevention_is_idempotent_and_only_stops_its_own_child() {
+        let first = SleepPrevention::default();
+        let second = SleepPrevention::default();
+        first.start().unwrap();
+        second.start().unwrap();
+        let pid = first.child.lock().unwrap().as_ref().unwrap().id();
+        first.start().unwrap();
+        assert_eq!(first.child.lock().unwrap().as_ref().unwrap().id(), pid);
+        first.stop().unwrap();
+        first.stop().unwrap();
+        assert!(first.child.lock().unwrap().is_none());
+        assert!(second.child.lock().unwrap().as_mut().unwrap().try_wait().unwrap().is_none());
+        second.stop().unwrap();
     }
 }
 
 #[tauri::command]
-fn stop_caffeinate() -> Result<String, String> {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("killall")
-            .arg("caffeinate")
-            .status()
-            .map(|_| "Caffeinate stopped".to_string())
-            .map_err(|e| e.to_string())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok("Sleep prevention skipped on non-macOS platforms.".to_string())
-    }
+fn start_caffeinate(state: tauri::State<'_, SleepPrevention>) -> Result<(), String> {
+    state.start()
 }
 
-
+#[tauri::command]
+fn stop_caffeinate(state: tauri::State<'_, SleepPrevention>) -> Result<(), String> {
+    state.stop()
+}
 
 #[tauri::command]
 fn get_session_status(session_id: String) -> Result<Option<db::TurnInfo>, String> {
@@ -154,6 +204,8 @@ fn trigger_via_cli(session_id: String, message: String) -> Result<String, String
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(SleepPrevention::default())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -164,6 +216,13 @@ pub fn run() {
             trigger_via_cli,
             get_session_status
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Err(error) = app.state::<SleepPrevention>().stop() {
+                    eprintln!("Failed to stop sleep prevention: {error}");
+                }
+            }
+        });
 }
