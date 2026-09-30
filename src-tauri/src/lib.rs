@@ -193,7 +193,7 @@ fn stop_caffeinate(state: tauri::State<'_, SleepPrevention>) -> Result<(), Strin
 
 #[tauri::command]
 fn get_session_status(session_id: String) -> Result<Option<db::TurnInfo>, String> {
-    Ok(db::get_latest_turn(&session_id))
+    db::get_latest_turn(&session_id)
 }
 
 #[tauri::command]

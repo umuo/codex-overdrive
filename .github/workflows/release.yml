@@ -63,4 +63,5 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+          retryAttempts: 3
           args: ${{ matrix.args }}

@@ -14,16 +14,20 @@ const previewSessions = [
   ['build-pipeline', '排查跨平台构建问题', false],
 ].map(([id, thread_name, is_goal_limited], index) => ({ id, thread_name, is_goal_limited, updated_at: new Date(Date.now() - index * 3600000).toISOString() }));
 
+const previewStarted = new Set<string>();
+
 export async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isPreview) {
     if (!isDesktop) throw new Error('请在桌面应用中连接 Codex');
     return nativeInvoke<T>(command, args);
   }
   await new Promise(resolve => setTimeout(resolve, 180));
+  if (command === "trigger_via_cli") previewStarted.add(String(args?.sessionId));
+  const started = previewStarted.has(String(args?.sessionId));
   const results: Record<string, unknown> = {
     get_sessions: previewSessions,
     check_quota: { allowed: true, used_percent: 38.5, reset_at: Math.floor(Date.now() / 1000) + 8235, error: null },
-    get_session_status: { turn_id: `preview-${args?.sessionId}`, status: 'completed' },
+    get_session_status: { turn_id: `preview-${args?.sessionId}-${started}`, status: started ? 'inProgress' : 'completed', is_usage_limited: false },
     trigger_via_cli: '预览消息已模拟加入队列',
     start_caffeinate: null,
     stop_caffeinate: null,

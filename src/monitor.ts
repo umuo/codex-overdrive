@@ -18,30 +18,68 @@ export function startMonitor(
   };
 }
 
-interface TurnInfo { turn_id: string; status: string }
+export interface TurnInfo {
+  turn_id: string;
+  status: string;
+  is_usage_limited: boolean;
+}
 
-export async function triggerIdleSessions(options: {
+export interface SessionMonitorState {
+  phase: "awaiting_result" | "waiting_quota" | "stopped";
+  lastSentTurn: string | null;
+}
+
+export async function checkMonitoredSessions(options: {
   sessionIds: string[];
+  quotaAllowed: boolean;
   isActive: () => boolean;
-  lastTriggered: Record<string, string>;
+  states: Record<string, SessionMonitorState>;
   pending: Set<string>;
   getStatus: (id: string) => Promise<TurnInfo | null>;
   trigger: (id: string) => Promise<void>;
+  onStop: (id: string, reason: string) => void;
   onError: (error: unknown) => void;
 }) {
-  const { isActive, pending, lastTriggered } = options;
+  const { isActive, pending, states } = options;
   for (const id of options.sessionIds) {
     if (!isActive()) return;
-    if (pending.has(id)) continue;
-    // Shared across effect generations, including while a CLI request is pending.
+    const state = states[id];
+    if (state?.phase === "stopped" || pending.has(id)) continue;
+    // Initial sends wait for available quota. Later checks inspect the session
+    // even when quota is unavailable, so successful sessions can stop promptly.
+    if (!state && !options.quotaAllowed) continue;
     pending.add(id);
     try {
       const turn = await options.getStatus(id);
       if (!isActive()) return;
-      if (!turn || turn.status === "inProgress" || lastTriggered[id] === turn.turn_id) continue;
+      if (state) {
+        const stop = (reason: string) => {
+          state.phase = "stopped";
+          options.onStop(id, reason);
+        };
+        if (!turn) continue;
+        if (turn.status === "inProgress") {
+          stop("会话已进行中");
+          continue;
+        }
+        // CLI acceptance does not mean a new turn is already in the database.
+        if (turn.turn_id === state.lastSentTurn) continue;
+        if (turn.status === "completed") {
+          stop("会话已正常完成");
+          continue;
+        }
+        if (turn.status !== "failed" && turn.status !== "interrupted") continue;
+        if (!turn.is_usage_limited) {
+          stop("会话因非额度原因中断，请手动检查");
+          continue;
+        }
+        state.phase = "waiting_quota";
+        if (!options.quotaAllowed) continue;
+      }
       await options.trigger(id);
-      // Remember successful requests even if monitoring stopped during the call.
-      lastTriggered[id] = turn.turn_id;
+      // Capture success even if stopped during IPC; each monitoring run owns
+      // its own state object, so a late response cannot affect a new run.
+      states[id] = { phase: "awaiting_result", lastSentTurn: turn?.turn_id ?? null };
     } catch (error) {
       if (isActive()) options.onError(error);
     } finally {

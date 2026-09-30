@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke, isPreview, isDesktop } from "./bridge";
 import "./App.css";
-import { startMonitor, triggerIdleSessions } from "./monitor";
+import { startMonitor, checkMonitoredSessions, type SessionMonitorState } from "./monitor";
 
 interface Session {
   id: string;
@@ -244,42 +244,63 @@ function App() {
     addLog(`[消息管理] 已删除常用语: "${triggerMessage}"`);
   };
 
-  // 记录已经触发过的回合 ID，避免在同一个回合重复发消息
-  const lastTriggeredTurnRef = useRef<Record<string, string>>({});
+  const monitorStatesRef = useRef<Record<string, SessionMonitorState>>({});
+  const [activeMonitorCount, setActiveMonitorCount] = useState(0);
 
   const pendingTriggersRef = useRef(new Set<string>());
 
   // Monitor loop (Smart Polling & Auto-Looping)
   useEffect(() => {
     if (!isMonitoring) return;
+    const states = monitorStatesRef.current;
 
     return startMonitor(async (isActive) => {
       const q = await fetchQuota();
       if (!isActive()) return 0;
       let nextCheckMs = 5 * 60 * 1000;
 
-      if (q && q.allowed) {
-        // 额度充足时，进入“无人值守/自动连点”模式
-        // 每隔一段较短的时间（比如 30 秒）检测一次会话是否空闲
-        await triggerIdleSessions({
-          sessionIds: Array.from(selectedSessions),
-          isActive,
-          lastTriggered: lastTriggeredTurnRef.current,
-          pending: pendingTriggersRef.current,
-          getStatus: id => invoke("get_session_status", { sessionId: id }),
-          trigger: async id => {
-            const name = sessions.find(session => session.id === id)?.thread_name || id.substring(0, 8);
-            addLog(`自动续行 · ${name} · 发送："${triggerMessage}"`);
-            await invoke("trigger_via_cli", { sessionId: id, message: triggerMessage });
-            if (isActive()) addLog(`发送成功 · ${name}`);
-          },
-          onError: err => addLog(`自动触发失败: ${err}`),
-        });
-        if (!isActive()) return 0;
-
-        // 额度充足且正在监控时，每 30 秒检测一次会话状态
+      await checkMonitoredSessions({
+        sessionIds: Array.from(selectedSessions),
+        quotaAllowed: q?.allowed === true,
+        isActive,
+        states,
+        pending: pendingTriggersRef.current,
+        getStatus: id => invoke("get_session_status", { sessionId: id }),
+        trigger: async id => {
+          const name = sessions.find(session => session.id === id)?.thread_name || id.substring(0, 8);
+          addLog(`额度可用 · ${name} · 发送："${triggerMessage}"`);
+          await invoke("trigger_via_cli", { sessionId: id, message: triggerMessage.trim() });
+          if (isActive()) addLog(`发送成功 · ${name}，等待下一次状态检查`);
+        },
+        onStop: (id, reason) => {
+          const name = sessions.find(session => session.id === id)?.thread_name || id.substring(0, 8);
+          addLog(`停止会话监控 · ${name} · ${reason}`);
+        },
+        onError: err => addLog(`监控检查失败: ${err}`),
+      });
+      if (!isActive()) return 0;
+      const remaining = Array.from(selectedSessions).filter(id => states[id]?.phase !== "stopped");
+      setActiveMonitorCount(remaining.length);
+      if (!remaining.length) {
+        monitoringRef.current = false;
+        monitorTogglePending.current = true;
+        setIsMonitoring(false);
+        setIsToggling(true);
+        addLog("所有会话均已停止监控。");
+        try {
+          await invoke("stop_caffeinate");
+        } catch (e) {
+          addLog(`释放防休眠进程失败: ${e}`);
+        } finally {
+          monitorTogglePending.current = false;
+          setIsToggling(false);
+        }
+        return 0;
+      }
+      const awaitingResult = remaining.some(id => states[id]?.phase === "awaiting_result");
+      if (q?.allowed || awaitingResult) {
+        // After sending, check session progress even while quota is unavailable.
         nextCheckMs = 30 * 1000;
-
       } else {
         // 额度耗尽时，根据剩余时间动态调整探测频率
         if (q && q.reset_at) {
@@ -390,6 +411,8 @@ function App() {
         } catch (e) {
           addLog(`防休眠启动失败: ${e}`);
         }
+        monitorStatesRef.current = {};
+        setActiveMonitorCount(selectedSessions.size);
         monitoringRef.current = true;
         setIsMonitoring(true);
         addLog(`开始监控，已选中 ${selectedSessions.size} 个会话。`);
@@ -442,15 +465,15 @@ function App() {
         <section className="metrics" aria-label="监控概览">
           <div className="metric"><div className="metric-label">已用额度 <button className="text-button" onClick={fetchQuota} disabled={isRefreshingQuota}>{isRefreshingQuota ? "更新中…" : "刷新"}</button></div><div className="metric-value">{quota ? quota.used_percent.toFixed(1) : "—"}<small>{quota ? "%" : ""}</small>{quota && <span className={`badge ${quotaError ? "warning" : quota.allowed ? "positive" : "warning"}`}>{quotaError ? "上次数据" : quota.allowed ? "可用" : "受限"}</span>}</div><progress aria-label="已用额度" max="100" value={quota?.used_percent || 0} /><p>{quotaError ? "读取失败，稍后重试" : quota ? "当前额度窗口" : "正在获取额度"}</p></div>
           <div className="metric"><div className="metric-label">距离额度重置</div><div className="metric-value mono">{quota?.reset_at ? timeLeftStr : "— — : — —"}</div><p>{quota?.reset_at ? `预计 ${new Date(quota.reset_at * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 重置` : "等待重置时间"}</p></div>
-          <div className="metric"><div className="metric-label">监控范围</div><div className="metric-value">{selectedSessions.size}<small>个会话</small></div><p>{isMonitoring ? "空闲时自动发送 · 同回合去重" : "从左侧选择需要继续的任务"}</p></div>
+          <div className="metric"><div className="metric-label">监控范围</div><div className="metric-value">{isMonitoring ? activeMonitorCount : selectedSessions.size}<small>个会话</small></div><p>{isMonitoring ? "进行中或正常完成后停止" : "从左侧选择需要继续的任务"}</p></div>
         </section>
 
         <section className="composer panel" aria-labelledby="composer-title">
-          <div className="section-heading"><h2 id="composer-title">触发消息</h2><span>会话空闲且额度可用时发送</span></div>
+          <div className="section-heading"><h2 id="composer-title">触发消息</h2><span>首次额度可用即发送 · 后续仅重试额度中断</span></div>
           <div className="message-presets" aria-label="常用语">{savedMessages.map(message => <button key={message} className="preset" title={message} aria-pressed={triggerMessage === message} disabled={editingLocked} onClick={() => setTriggerMessage(message)}>{message}</button>)}</div>
           <textarea aria-label="触发消息" value={triggerMessage} placeholder="输入希望 Codex 继续执行的指令…" disabled={editingLocked} onChange={e => setTriggerMessage(e.target.value)} rows={3} />
           <div className="message-toolbar"><span>{triggerMessage.length} 字</span><div><button className="text-button" onClick={handleSaveMessage} disabled={editingLocked || savedMessages.includes(triggerMessage.trim()) || !triggerMessage.trim()}>保存为常用语</button><button className="text-button" onClick={handleDeleteMessage} disabled={editingLocked || !savedMessages.includes(triggerMessage) || savedMessages.length <= 1}>删除此常用语</button></div></div>
-          <div className="action-bar"><p>{isMonitoring ? "监控中。停止后可修改会话和消息。" : !selectedSessions.size ? "选择会话后即可启动监控" : !triggerMessage.trim() ? "填写触发消息后即可启动" : `准备就绪，将应用于 ${selectedSessions.size} 个会话`}</p><div className="action-buttons"><button disabled={editingLocked || !selectedSessions.size || !triggerMessage.trim()} onClick={triggerAllSelected}>{isSending ? "发送中…" : "发送一次"}</button><button className={isMonitoring ? "danger-button" : "primary-button"} onClick={handleMonitorToggle} disabled={isToggling || isSending || (!isMonitoring && (!selectedSessions.size || !triggerMessage.trim()))}>{isToggling ? "处理中…" : isMonitoring ? "停止监控" : "启动监控"}</button></div></div>
+          <div className="action-bar"><p>{isMonitoring ? `正在监控 ${activeMonitorCount} 个会话。停止后可修改配置。` : !selectedSessions.size ? "选择会话后即可启动监控" : !triggerMessage.trim() ? "填写触发消息后即可启动" : `准备就绪，将应用于 ${selectedSessions.size} 个会话`}</p><div className="action-buttons"><button disabled={editingLocked || !selectedSessions.size || !triggerMessage.trim()} onClick={triggerAllSelected}>{isSending ? "发送中…" : "发送一次"}</button><button className={isMonitoring ? "danger-button" : "primary-button"} onClick={handleMonitorToggle} disabled={isToggling || isSending || (!isMonitoring && (!selectedSessions.size || !triggerMessage.trim()))}>{isToggling ? "处理中…" : isMonitoring ? "停止监控" : "启动监控"}</button></div></div>
         </section>
 
         <section className="activity panel" aria-labelledby="activity-title"><div className="section-heading"><h2 id="activity-title">运行记录 <span className="count">{log.length}</span></h2><div className="log-tools"><select aria-label="日志筛选" value={logFilter} onChange={e => setLogFilter(e.target.value)}><option value="all">全部记录</option><option value="error">仅错误</option></select><label><input type="checkbox" checked={followLogs} onChange={e => setFollowLogs(e.target.checked)} />跟随最新</label><button className="text-button" disabled={!log.length} onClick={() => setLog([])}>清空</button></div></div><div className="logs" role="log" aria-label="运行记录" aria-live="polite">{visibleLogs.length ? visibleLogs.map((line, i) => <div className={`log-line ${/失败|出错|错误/.test(line) ? "error" : ""}`} key={i}><time>{line.slice(1, line.indexOf("]"))}</time><span>{line.slice(line.indexOf("]") + 1).trim()}</span></div>) : <div className="empty-state"><strong>{logFilter === "error" ? "暂无错误记录" : "一切就绪，等待开始"}</strong><p>{logFilter === "error" ? "出现的错误会集中显示在这里。" : "启动监控或发送消息后，可在这里查看执行情况。"}</p></div>}<div ref={logEndRef} /></div></section>
