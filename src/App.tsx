@@ -465,7 +465,7 @@ function App() {
         <section className="metrics" aria-label="监控概览">
           <div className="metric"><div className="metric-label">已用额度 <button className="text-button" onClick={fetchQuota} disabled={isRefreshingQuota}>{isRefreshingQuota ? "更新中…" : "刷新"}</button></div><div className="metric-value">{quota ? quota.used_percent.toFixed(1) : "—"}<small>{quota ? "%" : ""}</small>{quota && <span className={`badge ${quotaError ? "warning" : quota.allowed ? "positive" : "warning"}`}>{quotaError ? "上次数据" : quota.allowed ? "可用" : "受限"}</span>}</div><progress aria-label="已用额度" max="100" value={quota?.used_percent || 0} /><p>{quotaError ? "读取失败，稍后重试" : quota ? "当前额度窗口" : "正在获取额度"}</p></div>
           <div className="metric"><div className="metric-label">距离额度重置</div><div className="metric-value mono">{quota?.reset_at ? timeLeftStr : "— — : — —"}</div><p>{quota?.reset_at ? `预计 ${new Date(quota.reset_at * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 重置` : "等待重置时间"}</p></div>
-          <div className="metric"><div className="metric-label">监控范围</div><div className="metric-value">{isMonitoring ? activeMonitorCount : selectedSessions.size}<small>个会话</small></div><p>{isMonitoring ? "进行中或正常完成后停止" : "从左侧选择需要继续的任务"}</p></div>
+          <div className="metric"><div className="metric-label">监控范围</div><div className="metric-value">{isMonitoring ? activeMonitorCount : selectedSessions.size}<small>个会话</small></div><p>{isMonitoring ? "持续监控，正常完成后停止" : "从左侧选择需要继续的任务"}</p></div>
         </section>
 
         <section className="composer panel" aria-labelledby="composer-title">

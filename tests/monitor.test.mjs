@@ -127,8 +127,8 @@ test('first available quota sends once regardless of prior turn status', async (
   }
 });
 
-test('running and normally completed new turns stop even without quota', async () => {
-  for (const status of ['inProgress', 'completed']) {
+test('normally completed new turns stop even without quota', async () => {
+  for (const status of ['completed']) {
     const stopped = [];
     const { options, sent } = fixture({ sessionIds: ['a'], onStop: id => stopped.push(id) });
     await checkMonitoredSessions(options);
@@ -163,14 +163,16 @@ test('quota interruption waits for recovery, resends once and keeps checking', a
   assert.equal(options.states.a.phase, 'stopped');
 });
 
-test('ordinary failure and manual interruption stop without resending', async () => {
+test('ordinary failure and manual interruption remain monitored without resending', async () => {
   for (const status of ['failed', 'interrupted']) {
-    const { options, sent } = fixture({ sessionIds: ['a'] });
+    const { options, sent, errors } = fixture({ sessionIds: ['a'] });
     await checkMonitoredSessions(options);
     options.getStatus = async () => turn('new', status);
     await checkMonitoredSessions(options);
+    await checkMonitoredSessions(options);
     assert.equal(sent.length, 1);
-    assert.equal(options.states.a.phase, 'stopped');
+    assert.equal(errors.length, 1);
+    assert.equal(options.states.a.phase, 'awaiting_result');
   }
 });
 
@@ -192,11 +194,16 @@ test('multi-session monitoring stops each session independently', async () => {
   options.getStatus = async id => turn('new', id === 'a' ? 'inProgress' : 'failed', id === 'b');
   options.quotaAllowed = false;
   await checkMonitoredSessions(options);
-  assert.deepEqual(stopped, ['a']);
+  assert.deepEqual(stopped, []);
+  assert.equal(options.states.a.phase, 'awaiting_result');
   assert.equal(options.states.b.phase, 'waiting_quota');
   options.quotaAllowed = true;
   await checkMonitoredSessions(options);
   assert.deepEqual(sent, ['a', 'b', 'b']);
+  options.getStatus = async id => turn('done', id === 'a' ? 'completed' : 'inProgress');
+  await checkMonitoredSessions(options);
+  assert.deepEqual(stopped, ['a']);
+  assert.equal(options.states.b.phase, 'awaiting_result');
 });
 
 test('fresh monitoring run sends again without inheriting previous stop state', async () => {
@@ -214,4 +221,40 @@ test('database read errors do not authorize sending', async () => {
   assert.equal(errors.length, 1);
   assert.equal(sent.length, 0);
   assert.equal(options.states.a, undefined);
+});
+
+
+test('running remains monitored until the same turn completes', async () => {
+  const stopped = [];
+  const { options, sent } = fixture({ sessionIds: ['a'], onStop: id => stopped.push(id) });
+  await checkMonitoredSessions(options);
+  options.getStatus = async () => turn('work', 'inProgress');
+  for (const quotaAllowed of [true, false, true]) {
+    options.quotaAllowed = quotaAllowed;
+    await checkMonitoredSessions(options);
+    assert.equal(options.states.a.phase, 'awaiting_result');
+    assert.deepEqual(stopped, []);
+    assert.equal(sent.length, 1);
+  }
+  options.getStatus = async () => turn('work', 'completed');
+  await checkMonitoredSessions(options);
+  assert.deepEqual(stopped, ['a']);
+});
+
+test('running then quota interrupted can resume and remain monitored', async () => {
+  const { options, sent } = fixture({ sessionIds: ['a'] });
+  await checkMonitoredSessions(options);
+  options.getStatus = async () => turn('work', 'inProgress');
+  await checkMonitoredSessions(options);
+  options.quotaAllowed = false;
+  options.getStatus = async () => turn('work', 'failed', true);
+  await checkMonitoredSessions(options);
+  assert.equal(options.states.a.phase, 'waiting_quota');
+  options.quotaAllowed = true;
+  await checkMonitoredSessions(options);
+  assert.equal(sent.length, 2);
+  options.getStatus = async () => turn('resumed', 'inProgress');
+  await checkMonitoredSessions(options);
+  assert.equal(options.states.a.phase, 'awaiting_result');
+  assert.equal(sent.length, 2);
 });

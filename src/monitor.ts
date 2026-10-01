@@ -27,6 +27,7 @@ export interface TurnInfo {
 export interface SessionMonitorState {
   phase: "awaiting_result" | "waiting_quota" | "stopped";
   lastSentTurn: string | null;
+  lastReportedErrorTurn?: string;
 }
 
 export async function checkMonitoredSessions(options: {
@@ -59,7 +60,7 @@ export async function checkMonitoredSessions(options: {
         };
         if (!turn) continue;
         if (turn.status === "inProgress") {
-          stop("会话已进行中");
+          state.phase = "awaiting_result";
           continue;
         }
         // CLI acceptance does not mean a new turn is already in the database.
@@ -70,7 +71,11 @@ export async function checkMonitoredSessions(options: {
         }
         if (turn.status !== "failed" && turn.status !== "interrupted") continue;
         if (!turn.is_usage_limited) {
-          stop("会话因非额度原因中断，请手动检查");
+          state.phase = "awaiting_result";
+          if (state.lastReportedErrorTurn !== turn.turn_id) {
+            state.lastReportedErrorTurn = turn.turn_id;
+            options.onError(`会话 ${id} 因非额度原因中断，请手动检查；继续监控，不自动发送`);
+          }
           continue;
         }
         state.phase = "waiting_quota";
